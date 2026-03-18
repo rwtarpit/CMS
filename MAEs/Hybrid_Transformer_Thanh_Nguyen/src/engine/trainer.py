@@ -69,6 +69,8 @@ class Trainer:
         Number of epochs to train for. Overrides config if provided.
     start_epoch: int, optional
         Epoch to start training from. Overrides config if provided.
+    steps: int, optional
+        Number of steps to train for.(For profiling and benchmarking purpose)
     logging_dir: str, optional
         Directory to save logs. Overrides config if provided.
     logging_steps: int, optional
@@ -104,6 +106,7 @@ class Trainer:
         callbacks: Optional[List[Dict]] = None,
         num_epochs: Optional[int] = None,
         start_epoch: Optional[int] = None,
+        steps : Optional[int] = None,
         logging_dir: Optional[str] = None,
         logging_steps: Optional[int] = None,
         progress_bar: Optional[bool] = None,
@@ -151,6 +154,7 @@ class Trainer:
             self.callbacks = get_callbacks_from_config(callbacks if callbacks is not None else config.callbacks, CALLBACK_REGISTRY)
             self.num_epochs = num_epochs if num_epochs is not None else config.num_epochs
             self.start_epoch = start_epoch if start_epoch is not None else config.start_epoch
+            self.steps =  steps if steps is not None else config.steps
             self.logging_dir = logging_dir if logging_dir is not None else config.logging_dir
             self.logging_steps = logging_steps if logging_steps is not None else config.logging_steps
             self.progress_bar = progress_bar if progress_bar is not None else config.progress_bar
@@ -173,6 +177,7 @@ class Trainer:
             self.callbacks = get_callbacks_from_config(callbacks, CALLBACK_REGISTRY) if callbacks is not None else None
             self.num_epochs = num_epochs if num_epochs is not None else 20
             self.start_epoch = start_epoch if start_epoch is not None else 0
+            self.steps = steps if steps is not None else 100
             self.logging_dir = logging_dir if logging_dir is not None else 'logs'
             self.logging_steps = logging_steps if logging_steps is not None else 25
             self.progress_bar = progress_bar if progress_bar is not None else True

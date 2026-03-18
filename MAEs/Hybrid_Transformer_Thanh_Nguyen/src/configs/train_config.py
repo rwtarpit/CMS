@@ -11,6 +11,7 @@ class TrainConfig:
     callbacks: list = None
     num_epochs: int = 20
     start_epoch: int = 0
+    steps: int = 20
     logging_dir: str = 'logs'
     logging_steps: int = 500
     progress_bar: bool = True

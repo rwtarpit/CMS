@@ -9,3 +9,4 @@ data/*
 !data/.gitkeep
 docker/*
 venv/*
+traces_dir

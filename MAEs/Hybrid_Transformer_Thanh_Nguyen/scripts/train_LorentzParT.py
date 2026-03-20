@@ -171,7 +171,7 @@ def _train_worker(
 )
 def run_training(
     seed:            int  = 42,
-    config_path:     str  = "/app/configs/train_LorentzParT.yaml",
+    config_path:     str  = "/app/configs/pretrain_LorentzParT.yaml",
     checkpoint_path: str  = None,
     train_data_dir:  str  = "/datasets/100k/train",
     val_data_dir:    str  = "/datasets/100k/val",
@@ -188,7 +188,7 @@ def run_training(
     world_size = torch.cuda.device_count()
     print(f"Launching on {world_size} GPUs")
 
-    run_name = "torch_compile_LorentzParT"
+    run_name = "torch_compile_masked_pretraining_LorentzParT"
     print(f"Run: {run_name}")
 
     worker_args = (

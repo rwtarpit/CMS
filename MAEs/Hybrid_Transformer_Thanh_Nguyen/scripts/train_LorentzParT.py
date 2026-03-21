@@ -14,12 +14,13 @@ image = (
     .pip_install_from_requirements("requirements.txt")
     .add_local_dir(".", remote_path="/app",
                    ignore=["data", "logs", "assets", "jobs", "notebooks",
-                            "venv", ".git", "tests", "__pycache__",
-                            "**/__pycache__", "*.pyc", "*.pt", "*.pth",
-                            "*.root", "*.npy", "*.tar", "*.png", "*.ipynb"])
+                           "venv", ".git", "tests", "__pycache__",
+                           "**/__pycache__", "*.pyc", "*.pt", "*.pth",
+                           "*.root", "*.npy", "*.tar", "*.png", "*.ipynb"])
 )
 
 app = modal.App("jetclass-profiler", image=image)
+
 
 def _profile_worker(
     rank: int,
@@ -34,6 +35,7 @@ def _profile_worker(
     warmup: int,
     active: int,
     steps: int,
+    debug_compile: bool,
 ):
     import sys
     sys.path.insert(0, "/app")
@@ -49,22 +51,45 @@ def _profile_worker(
     from src.utils.data import LazyJetClassDataset
 
     warnings.filterwarnings("ignore")
-
     set_seed(seed)
+
+    if debug_compile and rank == 0:
+        inductor_debug_dir = os.path.join(TRACE_DIR, "inductor_debug")
+        os.makedirs(inductor_debug_dir, exist_ok=True)
+
+        os.environ["TORCH_COMPILE_DEBUG"]     = "1"
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(TRACE_DIR, "inductor_cache")
+
+        import torch._inductor.config as inductor_cfg
+        inductor_cfg.debug             = True
+        inductor_cfg.trace.enabled     = True
+        inductor_cfg.trace.debug_dir   = inductor_debug_dir
+
+        os.environ["TORCH_LOGS"]          = "graph_breaks,recompiles,graph"
+        os.environ["TORCHDYNAMO_VERBOSE"] = "1"
+
+        log_path = os.path.join(TRACE_DIR, f"dynamo_rank{rank}.log")
+        _log_file = open(log_path, "w")
+        sys.stdout = _log_file
+        sys.stderr = _log_file
+        print(f"[rank {rank}] compile debug → {inductor_debug_dir}")
 
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
     model_config = LorentzParTConfig.from_dict(config["model"])
-    model_config.weights = None
+    model_config.weights = None  
 
     train_config = TrainConfig.from_dict(config["train"])
-    train_config.num_epochs  = 9999
-    train_config.save_ckpt   = False
-    train_config.save_best   = False
-    train_config.save_fig    = False
-    train_config.logging_dir = CKPT_DIR
-    
+    train_config.num_epochs    = 9999   
+    train_config.steps         = steps  
+    train_config.save_ckpt     = False
+    train_config.save_best     = False
+    train_config.save_fig      = False
+    train_config.logging_dir   = CKPT_DIR
+    train_config.logging_steps = 1      
+    train_config.callbacks     = []   
+
     print(f"[rank {rank}] steps={steps}, num_epochs={train_config.num_epochs}")
 
     setup_ddp(rank, world_size)
@@ -72,42 +97,39 @@ def _profile_worker(
 
     normalize = [True, False, False, True]
     norm_dict = {
-        "pT":     (92.72917175292969,     105.83937072753906),
-        "eta":    (0.0005733045982196927,  0.9174848794937134),
+        "pT":     (92.72917175292969,      105.83937072753906),
+        "eta":    (0.0005733045982196927,   0.9174848794937134),
         "phi":    (-0.00041169871110469103, 1.8136887550354004),
-        "energy": (133.8745574951172,      167.528564453125),
+        "energy": (133.8745574951172,       167.528564453125),
     }
-
-    obj_list = [norm_dict]
-    torch.distributed.broadcast_object_list(obj_list, src=0)
-    norm_dict = obj_list[0]
+    if world_size > 1:
+        obj_list = [norm_dict]
+        torch.distributed.broadcast_object_list(obj_list, src=0)
+        norm_dict = obj_list[0]
 
     mask_mode = "biased" if model_config.mask else None
-    train_dataset = LazyJetClassDataset(train_data_dir, normalize, norm_dict, mask_mode=mask_mode)
-    val_dataset   = LazyJetClassDataset(val_data_dir,   normalize, norm_dict, mask_mode=mask_mode)
+    train_dataset = LazyJetClassDataset(
+        train_data_dir, normalize, norm_dict, mask_mode=mask_mode
+    )
+    val_dataset = LazyJetClassDataset(
+        val_data_dir, normalize, norm_dict, mask_mode=mask_mode
+    )
 
     model = LorentzParT(config=model_config).to(device)
-    model = torch.compile(model)
+    compile_mode = "default" if debug_compile else "reduce-overhead"
+    model = torch.compile(model, mode=compile_mode)
 
+    common = dict(
+        model=model,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        device=device,
+        config=train_config,
+    )
     if model_config.mask:
-        trainer = MaskedModelTrainer(
-            model=model,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            device=device,
-            config=train_config,
-            steps=steps
-        )
+        trainer = MaskedModelTrainer(**common)
     else:
-        trainer = JetClassTrainer(
-            model=model,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            device=device,
-            metric=accuracy_metric_ce,
-            config=train_config,
-            steps=steps
-        )
+        trainer = JetClassTrainer(**common, metric=accuracy_metric_ce)
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"[rank {rank}] Resuming from checkpoint: {checkpoint_path}")
@@ -124,33 +146,37 @@ def _profile_worker(
             active=active,
         )
     else:
-        trainer._train_loop(profile_run=False) 
+        trainer.train()
 
     cleanup_ddp()
 
+    if debug_compile and rank == 0:
+        sys.stdout.flush()
+        sys.stderr.flush()
+
 
 @app.function(
-    gpu="A100:2",                  
+    gpu="A100:2",
     scaledown_window=60,
     volumes={
         "/traces":   trace_volume,
-        "/datasets": data_volume,   
+        "/datasets": data_volume,
         "/ckpts":    ckpt_volume,
     },
     timeout=900,
 )
 def run_profiler(
-    seed:            int = 42,
-    config_path:     str = "/app/configs/train_LorentzParT.yaml",
-    checkpoint_path: str = None,
-    train_data_dir: str = "/datasets/val_5M",
-    val_data_dir:   str = "/datasets/val_5M",
-    wait:   int = 2,
-    warmup: int = 3,
-    active: int = 5,
-    steps:  int = 15,
+    seed:            int  = 42,
+    config_path:     str  = "/app/configs/train_LorentzParT.yaml",
+    checkpoint_path: str  = None,
+    train_data_dir:  str  = "/datasets/val_5M",
+    val_data_dir:    str  = "/datasets/val_5M",
+    wait:            int  = 2,
+    warmup:          int  = 3,
+    active:          int  = 5,
+    steps:           int  = 15,
+    debug_compile:   bool = False,
 ):
-    
     import torch
     import torch.multiprocessing as mp
 
@@ -160,22 +186,23 @@ def run_profiler(
             f"steps={steps} must be >= wait+warmup+active={required}. "
             f"Set steps >= {required}."
         )
-    
+
+    # Must be set before mp.spawn forks
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29500"
 
     world_size = torch.cuda.device_count()
     print(f"Launching on {world_size} GPUs")
 
-    run_name   = f"jetclass_a100_w{wait}_wm{warmup}_a{active}"
+    run_name   = f"jetclass_a100x{world_size}_w{wait}_wm{warmup}_a{active}"
     tb_log_dir = os.path.join(TRACE_DIR, run_name)
     os.makedirs(tb_log_dir, exist_ok=True)
 
     print(f"Profiling run : {run_name}")
     print(f"  schedule    : wait={wait}, warmup={warmup}, active={active}")
     print(f"  steps       : {steps}")
+    print(f"  debug       : {debug_compile}")
     print(f"  traces →    : {tb_log_dir}")
-
 
     worker_args = (
         world_size,
@@ -189,6 +216,7 @@ def run_profiler(
         warmup,
         active,
         steps,
+        debug_compile,
     )
 
     if world_size > 1:
@@ -197,51 +225,30 @@ def run_profiler(
         _profile_worker(0, *worker_args)
 
     import time
-    time.sleep(10)
+    time.sleep(10) 
     trace_volume.commit()
-    print(f"\nDone. Traces written to volume at: {tb_log_dir}")
-    print("Serve TensorBoard:  modal serve modal_profile.py::tensorboard_app")
 
-
-@app.function(
-    volumes={TRACE_DIR: trace_volume},
-    scaledown_window=300,
-)
-@modal.wsgi_app()
-def tensorboard_app():
-    import time
-    from tensorboard.backend import application
-    from tensorboard import default
-
-    class _VolumeRefreshMiddleware:
-        def __init__(self, wsgi_app):
-            self._app = wsgi_app
-
-        def __call__(self, environ, start_response):
-            trace_volume.reload()
-            return self._app(environ, start_response)
-
-    wsgi_app = application.TensorBoardWSGIApp(
-        flags=None,
-        plugins=default.get_plugins(),
-        data_provider=None,
-        assets_zip_provider=None,
-    )
-    time.sleep(1)
-    return _VolumeRefreshMiddleware(wsgi_app)
+    print(f"\nDone. Traces written to: {tb_log_dir}")
+    if debug_compile:
+        print("\nDownload debug files:")
+        print("  MSYS_NO_PATHCONV=1 modal volume get profiler-traces /inductor_debug ./local_inductor_debug")
+        print("  MSYS_NO_PATHCONV=1 modal volume get profiler-traces /dynamo_rank0.log ./dynamo_rank0.log")
+    print("\nServe TensorBoard:")
+    print("  modal serve scripts/train_LorentzParT.py::tensorboard_app")
 
 
 @app.local_entrypoint()
 def main(
-    seed:            int = 42,
-    config_path:     str = "/app/configs/train_LorentzParT.yaml",
-    checkpoint_path: str = None,
-    train_data_dir:  str = "/datasets/val_5M",  
-    val_data_dir:    str = "/datasets/val_5M",
-    wait:   int = 2,
-    warmup: int = 3,
-    active: int = 5,
-    steps:  int = 15,
+    seed:            int  = 42,
+    config_path:     str  = "/app/configs/train_LorentzParT.yaml",
+    checkpoint_path: str  = None,
+    train_data_dir:  str  = "/datasets/val_5M",
+    val_data_dir:    str  = "/datasets/val_5M",
+    wait:            int  = 2,
+    warmup:          int  = 3,
+    active:          int  = 5,
+    steps:           int  = 15,
+    debug_compile:   bool = False,
 ):
     run_profiler.remote(
         seed=seed,
@@ -253,4 +260,5 @@ def main(
         warmup=warmup,
         active=active,
         steps=steps,
+        debug_compile=debug_compile,
     )

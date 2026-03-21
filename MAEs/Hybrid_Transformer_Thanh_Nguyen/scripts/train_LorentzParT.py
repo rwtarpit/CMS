@@ -1,21 +1,3 @@
-"""
-modal_train.py
---------------
-Train LorentzParT on 100k JetClass events for the GSoC test task.
-Compares baseline vs optimized (torch.compile + bf16 + pin_memory).
-
-Usage
------
-# Baseline run
-modal run scripts/modal_train.py
-
-# Optimized run  
-modal run scripts/modal_train.py --use-compile --use-bf16
-
-# Download results
-modal volume get jetclass-ckpts /results ./local_results
-"""
-
 import os
 import time
 import modal
@@ -107,7 +89,7 @@ def _train_worker(
 
     model = LorentzParT(config=model_config).to(device)
 
-    # torch.compile wraps the model before DDP (inside trainer)
+    # torch.compile
     if use_compile:
         print(f"[rank {rank}] Applying torch.compile...")
         model = torch.compile(model, mode="reduce-overhead")
@@ -158,7 +140,7 @@ def _train_worker(
 
     cleanup_ddp()
 
-
+# modal setup
 @app.function(
     gpu="A100:2",
     scaledown_window=60,
@@ -187,7 +169,7 @@ def run_training(
     world_size = torch.cuda.device_count()
     print(f"Launching on {world_size} GPUs")
 
-    run_name = "torch_compile_FA_masked_pretraining_LorentzParT"
+    run_name = "torch_compile_masked_pretraining_LorentzParT"
     print(f"Run: {run_name}")
 
     worker_args = (

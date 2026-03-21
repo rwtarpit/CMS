@@ -57,22 +57,22 @@ def _profile_worker(
         inductor_debug_dir = os.path.join(TRACE_DIR, "inductor_debug")
         os.makedirs(inductor_debug_dir, exist_ok=True)
 
-        os.environ["TORCH_COMPILE_DEBUG"]     = "1"
+        os.environ["TORCH_COMPILE_DEBUG"] = "1"
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(TRACE_DIR, "inductor_cache")
 
         import torch._inductor.config as inductor_cfg
-        inductor_cfg.debug             = True
-        inductor_cfg.trace.enabled     = True
-        inductor_cfg.trace.debug_dir   = inductor_debug_dir
+        inductor_cfg.debug = True
+        inductor_cfg.trace.enabled = True
+        inductor_cfg.trace.debug_dir = inductor_debug_dir
 
-        os.environ["TORCH_LOGS"]          = "graph_breaks,recompiles,graph"
+        os.environ["TORCH_LOGS"] = "graph_breaks,recompiles,graph"
         os.environ["TORCHDYNAMO_VERBOSE"] = "1"
 
         log_path = os.path.join(TRACE_DIR, f"dynamo_rank{rank}.log")
         _log_file = open(log_path, "w")
         sys.stdout = _log_file
         sys.stderr = _log_file
-        print(f"[rank {rank}] compile debug → {inductor_debug_dir}")
+        print(f"[rank {rank}] compile debug : {inductor_debug_dir}")
 
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
@@ -119,7 +119,7 @@ def _profile_worker(
     compile_mode = "default" if debug_compile else "reduce-overhead"
     model = torch.compile(model, mode=compile_mode)
 
-    common = dict(
+    meta_config = dict(
         model=model,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
@@ -127,9 +127,9 @@ def _profile_worker(
         config=train_config,
     )
     if model_config.mask:
-        trainer = MaskedModelTrainer(**common)
+        trainer = MaskedModelTrainer(**meta_config)
     else:
-        trainer = JetClassTrainer(**common, metric=accuracy_metric_ce)
+        trainer = JetClassTrainer(**meta_config, metric=accuracy_metric_ce)
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"[rank {rank}] Resuming from checkpoint: {checkpoint_path}")
@@ -175,7 +175,6 @@ def run_profiler(
     warmup:          int  = 3,
     active:          int  = 5,
     steps:           int  = 15,
-    debug_compile:   bool = False,
 ):
     import torch
     import torch.multiprocessing as mp
@@ -187,7 +186,6 @@ def run_profiler(
             f"Set steps >= {required}."
         )
 
-    # Must be set before mp.spawn forks
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29500"
 
@@ -199,10 +197,9 @@ def run_profiler(
     os.makedirs(tb_log_dir, exist_ok=True)
 
     print(f"Profiling run : {run_name}")
-    print(f"  schedule    : wait={wait}, warmup={warmup}, active={active}")
-    print(f"  steps       : {steps}")
-    print(f"  debug       : {debug_compile}")
-    print(f"  traces →    : {tb_log_dir}")
+    print(f"  schedule : wait={wait}, warmup={warmup}, active={active}")
+    print(f"  steps : {steps}")
+    print(f"  traces -> : {tb_log_dir}")
 
     worker_args = (
         world_size,
@@ -216,7 +213,6 @@ def run_profiler(
         warmup,
         active,
         steps,
-        debug_compile,
     )
 
     if world_size > 1:
@@ -229,12 +225,6 @@ def run_profiler(
     trace_volume.commit()
 
     print(f"\nDone. Traces written to: {tb_log_dir}")
-    if debug_compile:
-        print("\nDownload debug files:")
-        print("  MSYS_NO_PATHCONV=1 modal volume get profiler-traces /inductor_debug ./local_inductor_debug")
-        print("  MSYS_NO_PATHCONV=1 modal volume get profiler-traces /dynamo_rank0.log ./dynamo_rank0.log")
-    print("\nServe TensorBoard:")
-    print("  modal serve scripts/train_LorentzParT.py::tensorboard_app")
 
 
 @app.local_entrypoint()
@@ -248,7 +238,6 @@ def main(
     warmup:          int  = 3,
     active:          int  = 5,
     steps:           int  = 15,
-    debug_compile:   bool = False,
 ):
     run_profiler.remote(
         seed=seed,
@@ -260,5 +249,4 @@ def main(
         warmup=warmup,
         active=active,
         steps=steps,
-        debug_compile=debug_compile,
     )

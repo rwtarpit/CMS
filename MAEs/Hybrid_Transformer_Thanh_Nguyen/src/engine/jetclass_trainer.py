@@ -110,8 +110,6 @@ class JetClassTrainer(Trainer):
             import warnings
             warnings.warn(
                 f"self.steps={self.steps} is less than wait+warmup+active={required}. "
-                "The profiler may not capture any active steps. "
-                f"Set steps >= {required}.",
                 UserWarning,
                 stacklevel=2,
             )

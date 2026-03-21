@@ -110,7 +110,7 @@ def _train_worker(
     # torch.compile wraps the model before DDP (inside trainer)
     if use_compile:
         print(f"[rank {rank}] Applying torch.compile...")
-        model = torch.compile(model)
+        model = torch.compile(model, mode="reduce-overhead")
 
     if model_config.mask:
         trainer = MaskedModelTrainer(
@@ -177,7 +177,6 @@ def run_training(
     val_data_dir:    str  = "/datasets/100k/val",
     num_epochs:      int  = 1,
     use_compile:     bool = False,
-    use_bf16:        bool = False,
 ):
     import torch
     import torch.multiprocessing as mp
@@ -188,7 +187,7 @@ def run_training(
     world_size = torch.cuda.device_count()
     print(f"Launching on {world_size} GPUs")
 
-    run_name = "torch_compile_masked_pretraining_LorentzParT"
+    run_name = "torch_compile_FA_masked_pretraining_LorentzParT"
     print(f"Run: {run_name}")
 
     worker_args = (
@@ -209,7 +208,7 @@ def run_training(
 @app.local_entrypoint()
 def main(
     seed:            int  = 42,
-    config_path:     str  = "/app/configs/train_LorentzParT.yaml",
+    config_path:     str  = "/app/configs/pretrain_LorentzParT.yaml",
     checkpoint_path: str  = None,
     train_data_dir:  str  = "/datasets/100k/train",
     val_data_dir:    str  = "/datasets/100k/val",

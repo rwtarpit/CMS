@@ -10,3 +10,4 @@ data/*
 docker/*
 venv/*
 traces_dir
+inductor_out

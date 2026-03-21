@@ -18,18 +18,21 @@ class ParticleAttentionBlock(nn.Module):
         expansion_factor: int = 4,
     ):
         super(ParticleAttentionBlock, self).__init__()
-        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        assert embed_dim % num_heads == 0
 
         self.embed_dim = embed_dim
         self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.dropout_p = dropout
 
         self.layernorm1 = nn.LayerNorm(embed_dim)
-        self.pmha = nn.MultiheadAttention(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True
-        )
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+
         self.layernorm2 = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
         self.feedforward = Feedforward(
@@ -39,17 +42,46 @@ class ParticleAttentionBlock(nn.Module):
         )
 
     def forward(self, x: Tensor, padding_mask: Tensor, U: Optional[Tensor] = None) -> Tensor:
+        B, N, E = x.shape
         residual = x
         x = self.layernorm1(x)
-        x, _ = self.pmha(x, x, x, key_padding_mask=padding_mask, attn_mask=U)
+
+        q = self.q_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # (B*heads, N, N) ->(B, heads, N, N)
+        attn_bias = None
+        if U is not None:
+            attn_bias = U.reshape(B, self.num_heads, N, N)
+
+        # padding_mask: (B, N) float, 1.0 = padding token to ignore
+        if padding_mask is not None:
+            pad_bias = padding_mask.float()                      # (B, N)
+            pad_bias = pad_bias.masked_fill(pad_bias == 1, float('-inf'))
+            pad_bias = pad_bias.masked_fill(pad_bias == 0, 0.0)
+            pad_bias = pad_bias.unsqueeze(1).unsqueeze(2)        # (B, 1, 1, N)
+            attn_bias = attn_bias + pad_bias if attn_bias is not None else pad_bias
+
+        # SDPA
+        x = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_bias,
+            dropout_p=self.dropout_p,
+            scale=self.scale,
+        )
+
+        #(B, heads, N, head_dim) -> (B, N, embed_dim)
+        x = x.transpose(1, 2).reshape(B, N, E)
+        x = self.out_proj(x)
+
         x = self.layernorm2(x)
         x = self.dropout(x)
-
         x += residual
         x = self.feedforward(x)
 
         return x
-    
+        
 
 class ParticleTransformerEncoder(nn.Module):
     def __init__(

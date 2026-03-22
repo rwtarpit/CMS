@@ -1,10 +1,9 @@
 # Event Classification With Masked Transformer Autoencoders Test Task
 
-> **GSoC 2026 | ML4SCI | Event Classification with Masked Transformer Autoencoders**    
-> Model: LorentzParT (hybrid L-GATr + ParT encoder)  
-> Hardware: NVIDIA A100*2 (40GB) (via Modal Labs)
+**GSoC 2026 | ML4SCI | Event Classification with Masked Transformer Autoencoders**    
+ - Model: LorentzParT (hybrid L-GATr + ParT encoder)  
+ - Hardware: NVIDIA A100*2 (40GB) (via Modal Labs)
 
----
 
 ## Overview
 
@@ -12,19 +11,7 @@ This test task profiles and optimises the training pipeline for the LorentzParT 
 
 **Key result: `torch.compile(mode="reduce-overhead")` achieves around 32% reduction in per-step time versus the eager baseline, driven by Triton kernel fusion and CUDA graph replay.**
 
----
 
-## Table of Contents
-
-1. [Environment & Dataset](#environment--dataset)
-2. [Baseline Profiling](#baseline-profiling)
-3. [torch.compile Optimisation](#torchcompile-optimisation)
-4. [Benchmark Results](#benchmark-results)
-5. [Inductor Graph Analysis](#inductor-graph-analysis)
-6. [Generated Triton Kernels](#generated-triton-kernels)
-7. [Remaining Bottlenecks & Future Work](#remaining-bottlenecks--future-work)
-
----
 
 ## Environment & Dataset
 
@@ -188,7 +175,7 @@ Few points of graph breaks that i was able to understand were:
  - lgatr's Equilinear layer
  - Interaction Embedding
 
-![graph breaks](assets/pics/inductor.png)
+![graph breaks](assets/pics/graph_break.png)
 
 If we are able to eliminate/reduce graph breaks, we can achieve a single CUDA graph for forward pass and backward pass respectively. This leads to zero CPU intervention for kernel dispatching and therefore can optimise the pipeline even more.
 For multi GPU setup, this may benefit if data loading pipeline turns out to be slower, as then CPU can allocate resources to data prefetching instead.

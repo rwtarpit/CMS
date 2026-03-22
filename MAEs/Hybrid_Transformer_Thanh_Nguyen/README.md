@@ -23,6 +23,9 @@ This test task profiles and optimises the training pipeline for the LorentzParT 
 | Model | LorentzParT |
 | Config | `embed_dim=128, num_heads=8, num_layers=8, batch_size=1000, mask=True` |
 
+The A100 (40 GiBs) GPU was used from Modal Labs free tier that offers 30$ credits monthly for free.
+The Modal setup is present in both the working branches of the project.
+
 **Dataset split :**
 
 The dataset used is the 5M validation dataset further divided into train-val-test split without any data leak.
@@ -34,6 +37,12 @@ Though the test split has not been used in the benchmarking process as the inten
 | Train | `*_120.root` | 10 × 100k = 1M |
 | Val | `*_121.root` | 10 × 100k = 1M |
 | Test | `*_122.root` | 10 × 100k = 1M |
+
+**Project Overview**
+
+I have splitted the project into two branches:
+ - `optimisations`: used for profiling setup and optimsation ablations
+ - `benchmarking`: used to run final 2 epoch benchmarks for comparison
 
 ---
 

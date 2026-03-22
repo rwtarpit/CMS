@@ -116,6 +116,9 @@ Similarly, as I said kernel fusion and some well ablated replacements can give m
 The existing pipeline when ran on A100*2 (40 GiBs) for 2 epochs, takes approx. of 1137 secs with training and validation setup.
 (The test setup was excluded to mimic actual run on a small scale with only train and val dataset).
 
+There is subtle error in final val loss spiking from epoch 2.
+This doesn't occur in torch compile's benchmarking, so doesn't seem to be a bug in pipeline. I will  re-run it and inspect if it happens again.
+
 ## torch.compile Optimisation
 
 Three configurations were profiled and compared against the eager baseline.
@@ -127,16 +130,19 @@ model = torch.compile(model, mode="default")
 
 **Avg step time: 147,498 µs (−22% vs baseline)**
 
-| Metric | Baseline | torch.compile default |
-|--------|----------|----------------------|
-| Step time | 190,019 µs | 147,498 µs |
-| SM Efficiency | 69.84% | 83.54% |
-| Occupancy | 41.56% | 53.38% |
-| CPU Exec share | 3% | 15.2% |
+![torch_compile_default](assets/pics/tc_default_summary.png)
 
-The jump in CPU execution share (3% -> 15.2%) is most likely the Triton runtime overhead — the JIT compiler is still registering compiled kernels during the profiled steps.
+Torch compile is able to fuse majority of small ops into single kernel and thus is able to give almost a quarter of improvement in avg step time. Improved SM efficiency and occupancy further supports the argument.
 
-![INSERT: TensorBoard comparison — baseline vs default compile kernel timeline](images/tc_execution_summary.png)
+And as expected CPU time increases with torch compile due to torch inductor's overhead that has to analyse the whole CUDA graph and write triton kernels on the fly in first few iterations.
+
+![INSERT: TensorBoard comparison — baseline vs default compile kernel timeline](assets/pics/tc_default_kernel.png)
+
+Furthermore torch compile fuses many kernels together and replaces them with JIT written triton kernels.
+And as we can see GEMM kernels are still being dispatched as triton by default can't fuse them as they are external kernels.
+An opportunity (but very hard to beat CUTLASS or CUBLASS kernels) rises here to write custom kernels that can replace these external kernels with surrounding ops and taking leverage of tensor cores as well
+
+Next we will try to squeeze more gains from torch compile and analyse what torch compile was able to and what it was not able to fuse.
 
 ---
 
@@ -147,22 +153,17 @@ model = torch.compile(model, mode="reduce-overhead")
 
 `reduce-overhead` mode captures the entire forward+backward as a CUDA graph, replacing repeated kernel launches with a single `cudaGraphLaunch`. This eliminates CPU dispatch overhead and minimises host-device synchronisation.
 
+![torch compile reduce-overhead](assets/pics/tc_execution_summary.png)
+
 **Avg step time: 127,965 µs (−32% vs baseline)**
 
-| Metric | Baseline | default | reduce-overhead |
-|--------|----------|---------|-----------------|
-| Step time | 190,019 µs | 147,498 µs | **127,965 µs** |
-| SM Efficiency | 69.84% | 83.54% | 87.5% |
-| Occupancy | 41.56% | 53.38% | 53.38% |
-| CPU Exec share | 3% | 15.2% | 6.3% |
-| Memcpy time | 2,081 µs | — | **84 µs (−96%)** |
-
+With `reduce-overhead` mode we were able to squeeze more from torch compile as now request to CPU to dispatch each kernel again and again for each step is reduced.
 The 96% reduction in Memcpy time is the clearest signature of CUDA graph replay — repeated host-device transfers are replaced by pre-recorded graph execution.
+Although the kernel time remains same hinting towards that torch compile has squeezed out peak possible fusion and kernels it could manage to.
 
-> 📊 **[INSERT: Side-by-side TensorBoard trace — default vs reduce-overhead, showing CPU idle gap elimination]**
+The benchmarking time decreases by a good **310 seconds (27%)** :
 
-> 📊 **[INSERT: Bar chart — step time comparison across all three configurations]**
-
+![benchmark torch compile](assets/pics/tc_benchmark.png)
 ---
 
 ### Epoch-Level Benchmark

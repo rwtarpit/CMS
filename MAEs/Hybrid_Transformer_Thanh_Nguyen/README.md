@@ -119,6 +119,7 @@ The existing pipeline when ran on A100*2 (40 GiBs) for 2 epochs, takes approx. o
 There is subtle error in final val loss spiking from epoch 2.
 This doesn't occur in torch compile's benchmarking, so doesn't seem to be a bug in pipeline. I will  re-run it and inspect if it happens again.
 
+
 ## torch.compile Optimisation
 
 Three configurations were profiled and compared against the eager baseline.
@@ -159,6 +160,7 @@ model = torch.compile(model, mode="reduce-overhead")
 
 With `reduce-overhead` mode we were able to squeeze more from torch compile as now request to CPU to dispatch each kernel again and again for each step is reduced.
 The 96% reduction in Memcpy time is the clearest signature of CUDA graph replay — repeated host-device transfers are replaced by pre-recorded graph execution.
+
 Although the kernel time remains same hinting towards that torch compile has squeezed out peak possible fusion and kernels it could manage to.
 
 The benchmarking time decreases by a good **310 seconds (27%)** :
@@ -166,168 +168,16 @@ The benchmarking time decreases by a good **310 seconds (27%)** :
 ![benchmark torch compile](assets/pics/tc_benchmark.png)
 ---
 
-### Epoch-Level Benchmark
+### Configuration 3: `flash_attention backend for pmha + torch compile`
 
+I also tried to use flash attention backend from `torch.nn.functional.scaled_dot_product_attention` by using `U` vector as attention mask as torch compile fuses it down into a bunch of kernels instead of one. But the results were lower than torch compile itself.
 
-| Configuration | Epoch Time | val_loss | val_metric |
-|---------------|-----------|----------|------------|
-| Baseline (eager) | 547.7s | 1.9682 | 0.2408 |
-| torch.compile (reduce-overhead) | 822.7s | — | — |
+ Upon inspecting, it turns out that  to use flash-attention backend in pytorch, `num_heads` should be atleast 16(8 in our case). So this also holds optimisation scope based on ablations and architecture decisions (either to double `num_heads` or write custom triton kernel for `pmha`).
 
-The compile configuration is slower on epoch 1 due to Triton kernel compilation overhead. Break-even occurs at approximately epoch 2–3, after which the 32% per-step speedup accumulates. For long pretraining runs this is a clear net win.
-
-> 📊 **[INSERT: Epoch time vs epoch number curve — showing compile warmup then speedup crossover]**
-
----
-
-## Inductor Graph Analysis
-
-`torch.compile` internally uses the Inductor backend which decomposes the model into an FX graph and generates optimised Triton kernels. Exporting the compiled graph reveals what was fused and what remains as separate cuBLAS calls.
-
-### Graph Break: L-GATr Filesystem Call
-
-The model compiles into **two CUDA graph partitions** instead of one due to a graph break in the L-GATr equivariant linear layer:
-```python
-# lgatr/primitives/linear.py:43
-filename = Path(__file__).parent.resolve() / file  # posix.lstat call
-```
-
-`posix.lstat` is a filesystem syscall that `torch.dynamo` cannot trace, causing Dynamo to partition the graph at this boundary. The result is two separate CUDA graphs with a synchronisation point between them.
-
-**Fix — pre-warm the `@lru_cache` before compilation:**
-```python
-import lgatr.primitives.linear as lgatr_linear
-lgatr_linear._compute_pin_equi_linear_basis(
-    device=torch.device('cuda', rank),
-    dtype=torch.float32
-)
-model = torch.compile(model, mode="reduce-overhead")
-```
-
-Pre-warming populates the cache before Dynamo traces the graph, so the filesystem call is never seen during tracing and a single unified CUDA graph is produced.
-
-> 📊 **[INSERT: Diagram showing two-partition graph break vs single unified graph after fix]**
-
-### Partition Structure
-
-| Partition | AOT ID | Contents |
-|-----------|--------|---------|
-| 1 (AOT 12) | `12_forward` | InteractionEmbedding: BatchNorm → Conv1d → GELU pipeline, produces interaction matrix U |
-| 2 (AOT 14) | `14_forward` | ParT encoder: 8× attention blocks with LayerNorm, MHA, FFN |
-
-The boundary between partitions is the `EquiLinear` call — Partition 1 outputs `(view_2, view_1)` which feed directly into Partition 2 as `primals_1, primals_11`.
-
----
-
-## Generated Triton Kernels
-
-### Partition 2 — ParT Encoder Kernels
-
-Inspecting the generated Triton source reveals what torch.compile successfully fused and what remains as unfused cuBLAS calls.
-
-#### Fused Operations (Triton kernels)
-
-| Kernel Name | Type | Fused Operations |
-|-------------|------|-----------------|
-| `triton_per_fused_clone_native_layer_norm_transpose_view_0` | `per` (persistent reduction) | LayerNorm + transpose + clone |
-| `triton_red_fused_add_native_dropout_native_layer_norm_..._9` | `red` (reduction) | LayerNorm + Dropout + Residual add + LayerNorm |
-| `triton_per_fused_gelu_native_dropout_native_layer_norm_view_10` | `per` | GELU + Dropout + LayerNorm |
-| `triton_per_fused__softmax_exp_native_dropout_..._6` | `per` | Online softmax + Dropout (fused attention weights) |
-| `triton_per_fused_add_addmm_clone_native_dropout_..._11` | `per` | addmm + Dropout + LayerNorm + transpose |
-
-The most impactful fusion is `triton_red_fused_add_native_dropout_native_layer_norm_..._9` which collapses four separate operations (LayerNorm → Dropout → residual add → LayerNorm) into a single kernel with no intermediate tensor materialisation.
-
-> 📊 **[INSERT: Annotated kernel source snippet showing the fused LayerNorm+Dropout+Residual kernel]**
-
-#### Unfused Operations (extern_kernels — cuBLAS/cuDNN)
-```python
-# These remain as separate cuBLAS calls — torch.compile cannot fuse across them
-extern_kernels.addmm(...)     # Linear projections (QKV, output, FFN)
-extern_kernels.mm(...)        # FFN matmuls  
-extern_kernels.baddbmm(...)   # QK^T attention scores  ← Flash Attention target
-extern_kernels.bmm(...)       # AV attention output    ← Flash Attention target
-```
-
-The attention pattern repeats 7 times across the 8 attention blocks:
-```
-extern_kernels.baddbmm(buf10, Q, K^T)   # [4000, 128, 128] — 262MB
-triton softmax kernel
-extern_kernels.bmm(softmax_out, V)
-```
-
-`buf10` (interaction matrix U, shape `[4000, 128, 128]` = 262MB) is passed as the additive bias to every `baddbmm` call and persists in memory across all 8 blocks.
-
-> 📊 **[INSERT: TensorBoard trace annotated to show the repeated baddbmm→softmax→bmm pattern per block]**
-
----
-
-### Partition 1 — InteractionEmbedding Kernels
-
-| Kernel Name | Type | Operations |
-|-------------|------|-----------|
-| `triton_red_fused__native_batch_norm_legit_functional_clone_transpose_view_0` | `red` | BatchNorm reduction pass 1 |
-| `triton_per_fused__native_batch_norm_legit_functional_clone_transpose_view_1` | `per` | BatchNorm reduction pass 2 |
-| `triton_poi_fused__native_batch_norm_legit_functional_gelu_7` | `poi` (pointwise) | BatchNorm normalise + GELU |
-| `triton_poi_fused_convolution_4` | `poi` | Conv1d bias add |
-
-Notable: the `extern_kernels.convolution` calls in this partition use cuDNN rather than cuBLAS. Since all convolutions have `kernel_size=1`, they are mathematically equivalent to `nn.Linear` and could be replaced to use the more efficient `addmm` path with better Tensor Core utilisation.
-
-Additionally, `triton_poi_fused_add_copy__12` appears 5 times — one per BatchNorm layer — each updating a scalar running statistics counter. These are 5 unnecessary GPU kernel launches that could be eliminated by replacing `BatchNorm1d` with `LayerNorm`.
-
-> 📊 **[INSERT: Partition 1 kernel timeline showing the repeated BatchNorm multi-pass reduction pattern]**
-
----
+ ![FA-backend](assets/pics/image.png)
 
 ## Remaining Bottlenecks & Future Work
 
-### Identified from Kernel Analysis
-
-| Bottleneck | Root Cause | Proposed Fix | Expected Impact |
-|------------|-----------|--------------|----------------|
-| `ampere_sgemm_128x128` (float32) | No bf16 autocast | `torch.autocast('cuda', dtype=torch.bfloat16)` | ~2× matmul throughput, unlocks Tensor Cores |
-| L-GATr graph break | `posix.lstat` in `_compute_pin_equi_linear_basis` | Pre-warm `lru_cache` before `torch.compile` | Single CUDA graph, eliminates partition sync |
-| `extern_kernels.baddbmm/bmm` (7× per step) | Unfused attention, 262MB U matrix persists | `F.scaled_dot_product_attention` with `attn_mask=U` | Eliminates 262MB allocation, fuses QK^T+softmax+AV |
-| `libdevice.erf` in GELU | Exact GELU formulation | `F.gelu(x, approximate='tanh')` | Faster Triton kernel |
-| `Conv1d` in InteractionEmbedding | cuDNN overhead for 1×1 kernels | Replace with `nn.Linear` | cuBLAS GEMM, better TC utilisation |
-| `BatchNorm1d` running stats | 5 scalar kernel launches per step | Replace with `nn.LayerNorm` | Eliminates GPU→CPU syncs |
-| 8 NaN checks in `_get_interaction` | `.any()` forces GPU→CPU sync | Remove checks (use `torch.where` + `clamp`) | Eliminates 8 sync points per step |
-
-### Flash Attention Constraint
-
-Replacing `nn.MultiheadAttention` with `F.scaled_dot_product_attention` was implemented and tested. The current config (`embed_dim=128, num_heads=8`) produces `head_dim=16`, which falls below the Flash Attention minimum efficient tile size on A100 (`head_dim≥32`). PyTorch falls back to the memory-efficient attention backend, which is slower than the fused Triton softmax kernel torch.compile already generates.
-
-**Proposed resolution:** increase `embed_dim` to 256 with `num_heads=8` (`head_dim=32`), enabling Flash Attention while increasing model capacity. An ablation study on val_loss vs training speed is needed to validate this tradeoff.
-
-### Proposed Optimisation Stack (Priority Order)
-```
-1. lru_cache pre-warm          → single CUDA graph (no code change to model)
-2. Remove NaN checks           → eliminate 8 GPU syncs per step
-3. Conv1d → Linear             → better GEMM path in InteractionEmbedding  
-4. BatchNorm → LayerNorm       → eliminate running stats syncs
-5. torch.autocast bf16         → 2× matmul throughput, Tensor Core utilisation
-6. F.gelu(approximate='tanh')  → faster activation kernel
-7. embed_dim 128→256           → enables Flash Attention (head_dim 16→32)
-```
-
-Each optimisation is independently measurable. The combined stack is projected to bring Tensor Core utilisation from 7.3% toward 60%+, with step time approaching ~70,000 µs from the current 127,965 µs baseline with reduce-overhead.
-
----
-
-## Repository Structure
-```
-├── scripts/
-│   ├── train_LorentzParT.py      # profiler-instrumented training script
-│   └── modal_train.py            # Modal deployment + benchmarking
-├── src/
-│   ├── models/
-│   │   ├── lorentz_part.py       # LorentzParT model
-│   │   ├── processor.py          # ParticleProcessor + InteractionEmbedding
-│   │   └── part.py               # ParticleTransformer + ParticleAttentionBlock
-│   └── configs/
-│       └── train_LorentzParT.yaml
-├── traces_dir/                   # local profiler traces (TensorBoard)
-└── README.md
-```
 
 ---
 

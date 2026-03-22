@@ -168,18 +168,52 @@ The benchmarking time decreases by a good **310 seconds (27%)** :
 ![benchmark torch compile](assets/pics/tc_benchmark.png)
 ---
 
-### Configuration 3: `flash_attention backend for pmha + torch compile`
+### Configuration 3: `flash_attention backend for ``pmha`` + torch compile`
 
-I also tried to use flash attention backend from `torch.nn.functional.scaled_dot_product_attention` by using `U` vector as attention mask as torch compile fuses it down into a bunch of kernels instead of one. But the results were lower than torch compile itself.
+I also tried to use flash attention backend from `torch.nn.functional.scaled_dot_product_attention` since current implementation uses naive `nn.MultiHeadAttention` which torch compile fuses down into a bunch of kernels instead of one.
 
- Upon inspecting, it turns out that  to use flash-attention backend in pytorch, `num_heads` should be atleast 16(8 in our case). So this also holds optimisation scope based on ablations and architecture decisions (either to double `num_heads` or write custom triton kernel for `pmha`).
+But the results were lower than torch compile itself.
+
+ Upon inspecting, it turns out that  to use flash-attention backend in pytorch, `num_heads` should be atleast 16(8 in our case). So this also holds optimisation scope based on ablations and architecture decisions (either to increase `num_heads` or write custom triton kernel for `pmha` which also takes `U` vector into account).
 
  ![FA-backend](assets/pics/image.png)
 
 ## Remaining Bottlenecks & Future Work
 
+Even though torch compile has been able to provide a big optimisation already, thanks to its fused kernels, we can still push for more benefits.
+
+If we inspect the CUDA graph created by `torch.compile(..., mode=``reduce-overhead``)` it shows many graph breaks. These graph breaks means that CPU has to intervene again to dispatch kernels again in each step. Possible likely reasons for this are the operations that torch compile isn't able to fuse, dynamic input shapes, calls to CPU (for ex: print statements).
+
+Few points of graph breaks that i was able to understand were:
+ - lgatr's Equilinear layer
+ - Interaction Embedding
+
+![graph breaks](assets/pics/inductor.png)
+
+If we are able to eliminate/reduce graph breaks, we can achieve a single CUDA graph for forward pass and backward pass respectively. This leads to zero CPU intervention for kernel dispatching and therefore can optimise the pipeline even more.
+For multi GPU setup, this may benefit if data loading pipeline turns out to be slower, as then CPU can allocate resources to data prefetching instead.
+
+This leaves us with another path to explore.
 
 ---
+
+## Conclusions
+
+This report was completed as part of the test task for GSoC 2026, **ML4SCI — Event Classification with Masked Transformer Autoencoders**.
+
+The goal was to understand the LorentzParT training pipeline deeply enough to identify real bottlenecks and propose grounded optimizations.
+
+**What was found through analysis:**
+
+torch compile already provides a great and optimised baseline for the pipeline. Writing custom kernels can vastly be ruled out of project scope and only well understood graph breaks and overall pipeline optimisation should be priortised over custom kernels for  what torch compile already does efficiently.
+
+**What the ablations ruled out:**
+
+SDPA (FlashAttention) was tested and showed a regression at N=128 — compile's `baddbmm` + fused softmax is already optimal at this sequence length, and FlashAttention's advantage only materializes at changing model hyperparameters.
+
+**What this means for the GSoC project:**
+
+The profiling work can be used as a baseline for final deliverable project, where majority effort can be oriented towards exploring new architectures (for ex: JEPA), ablation and benchmarking results.
 
 ## References
 

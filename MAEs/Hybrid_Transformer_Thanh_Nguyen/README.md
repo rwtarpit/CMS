@@ -58,26 +58,55 @@ Profiling was performed using the PyTorch Profiler with CUDA activity tracing, r
 ![baseline profiling summary](assets/pics/baseline_execution_summary.png)
 
 **Avg step time: 190,019 µs**
+
 As shown in the execution summary, the pipeline is primarily compute bound, ie GPUs are taking most time to perform the maths.
 This gives us opportunity to optimise the default ops and kernels.
 Suprisingly the data transfer and communication is minimal, contradictory from what was expected given root files are unwrapped on the fly in the data loading pipeline. (this may not be accurate profile of data loading since the setup only uses 2 GPUs, so on more GPUs maybe we can get an accurate picture when there are more GPUs starving for data).
 
 ![baseline gpu summary](assets/pics/baseline_gpu_summary.png)
+
 Again the low occupancy and efficiency of cores gives concrete evidence that the setup is compute bound.
 
 ### GPU Utilisation Metrics
 The low Tensor Core usage (7.3%) immediately identifies float32 matmuls as the primary bottleneck — the A100 is designed to spend the vast majority of compute time in Tensor Cores for bf16/fp16 workloads. This needs to be addressed as well but keeping in mind the numerical accuracy and trade-offs that comes with speeding with lower precision dtypes.
 
+The kernel profiling shows major kernels 
+
 ![INSERT: Kernel time breakdown chart — baseline dominant kernels](assets/pics/baseline_kernel_view.png)
 
-### Dominant Kernels (Baseline)
+### Few Dominant Kernels (Baseline)
 
 | Kernel | Issue |
 |--------|-------|
-| `cudnn::bn_bw_1C11` | float32 BatchNorm, no Tensor Core |
-| `ampere_sgemm_128x128_nn/nt` | float32 matmul, no Tensor Core |
-| `aten::copy_` (host time 1.24M µs) | data transfer bottleneck |
-| `CrossEntropyLoss` (0 device time) | CPU-side loss computation |
+| `cudnn::bn_bw_1C11` |  BatchNorm backward pass |
+| `cudnn::bn_fw_1C11` |  BatchNorm forward pass |
+| `ampere_sgemm_128x128_nn/nt` |CUTLASS tuned matmul kernels but not using Tensor Core |
+
+I checked the BatchNorm appearances in codebase, and surprisingly only `InteractionEmbedding` uses it
+```python
+class InteractionEmbedding(nn.Module):
+    def __init__(
+        self,
+        num_interaction_features: int = 4,
+        pair_embed_dims: List[int] = [64, 64, 64, 8]
+    ):
+        super(InteractionEmbedding, self).__init__()
+        input_dim = num_interaction_features
+        layers = [nn.BatchNorm1d(input_dim)]
+        for dim in pair_embed_dims:
+            layers.extend([
+                nn.Conv1d(input_dim, dim, kernel_size=1),
+                nn.BatchNorm1d(dim),
+                nn.GELU()
+            ])
+            input_dim = dim
+            
+        self.embed = nn.Sequential(*layers)
+```
+This is a major bottleneck as batchnorm requires synchronization barriers and is notoriously hard to parellelise.
+This can be optimised by fusion with ops around it (torch compile does it to some extent, we will see below) or can be replaced with fast LayerNorm fused kernel given it is able to provide near lossless performance.
+
+Similarly, as I said kernel fusion and some well ablated replacements can give major computational boosts, and can be sought for if they fall in similar numerically accurate regime.
 
 ---
 

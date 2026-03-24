@@ -223,12 +223,14 @@ The profiling work can be used as a baseline for final deliverable project, wher
 ## Repository Structure
 
 Hybrid_Transformer_Thanh_Nguyen/
+
 ├── assets/             
 │   ├── pics/           
 │   └── results/        
 ├── configs/            
 ├── data/               
 ├── inductor_out/       # Generated Triton kernels from torch.compile
+
 ├── jobs/               
 ├── logs/               
 ├── notebooks/          
@@ -236,6 +238,7 @@ Hybrid_Transformer_Thanh_Nguyen/
 ├── src/                
 ├── tests/             
 ├── traces_dir/         # PyTorch Profiler trace files
+
 ├── venv/               
 ├── .gitignore         
 ├── README.md           

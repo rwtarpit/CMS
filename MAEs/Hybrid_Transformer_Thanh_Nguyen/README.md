@@ -56,7 +56,10 @@ Profiling was performed using the PyTorch Profiler with CUDA activity tracing, r
 **Avg step time: 190,019 µs**
 
 As shown in the execution summary, the pipeline is primarily compute bound, ie GPUs are taking most time to perform the maths.
-This gives us opportunity to optimise the default ops and kernels.
+This means GPUs are computationally busy for the data they are being provided with and warps are not stalling or sitting idle for next batch of data to come.
+
+However, Occupancy is comparatively low than other metrics here.
+
 Suprisingly the data transfer and communication is minimal, contradictory from what was expected given root files are unwrapped on the fly in the data loading pipeline. (this may not be accurate profile of data loading since the setup only uses 2 GPUs, so on more GPUs maybe we can get an accurate picture when there are more GPUs starving for data).
 
 ![baseline gpu summary](assets/pics/baseline_gpu_summary.png)
@@ -137,7 +140,7 @@ And as expected CPU time increases with torch compile due to torch inductor's ov
 
 Furthermore torch compile fuses many kernels together and replaces them with JIT written triton kernels.
 And as we can see GEMM kernels are still being dispatched as triton by default can't fuse them as they are external kernels.
-An opportunity (but very hard to beat CUTLASS or CUBLASS kernels) rises here to write custom kernels that can replace these external kernels with surrounding ops and taking leverage of tensor cores as well
+An opportunity rises here to bring tensor cores into picture by means of `AMP` and low precision dtypes like bfloat16. 
 
 Next we will try to squeeze more gains from torch compile and analyse what torch compile was able to and what it was not able to fuse.
 
@@ -155,7 +158,7 @@ model = torch.compile(model, mode="reduce-overhead")
 **Avg step time: 127,965 µs (−32% vs baseline)**
 
 With `reduce-overhead` mode we were able to squeeze more from torch compile as now request to CPU to dispatch each kernel again and again for each step is reduced.
-The 96% reduction in Memcpy time is the clearest signature of CUDA graph replay — repeated host-device transfers are replaced by pre-recorded graph execution.
+The 96% reduction in Memcpy time is the clear signature of CUDA graph replay — repeated host-device transfers are replaced by pre-recorded graph execution.
 
 Although the kernel time remains same hinting towards that torch compile has squeezed out peak possible fusion and kernels it could manage to.
 
@@ -180,16 +183,22 @@ Even though torch compile has been able to provide a big optimisation already, t
 
 If we inspect the CUDA graph created by `torch.compile(..., mode=``reduce-overhead``)` it shows many graph breaks. These graph breaks means that CPU has to intervene again to dispatch kernels again in each step. Possible likely reasons for this are the operations that torch compile isn't able to fuse, dynamic input shapes, calls to CPU (for ex: print statements).
 
-Few points of graph breaks that i was able to understand were:
+Few points of graph breaks that i was able to understand were operations in these modules:
  - lgatr's Equilinear layer
  - Interaction Embedding
 
 ![graph breaks](assets/pics/graph_break.png)
 
-If we are able to eliminate/reduce graph breaks, we can achieve a single CUDA graph for forward pass and backward pass respectively. This leads to zero CPU intervention for kernel dispatching and therefore can optimise the pipeline even more.
+The goal should be to achieve a single CUDA graph for forward pass and backward pass respectively. This leads to zero CPU intervention for kernel dispatching and therefore can optimise the pipeline even more.
 For multi GPU setup, this may benefit if data loading pipeline turns out to be slower, as then CPU can allocate resources to data prefetching instead.
 
 This leaves us with another path to explore.
+
+And to squeeze out performances from the setup that torch compile can't, we need to take account that physics related operations are being fused as generic operations since torch.Inductor can only fuse based on what templates it have. Therefore, it might not be able to achieve the peak of fusions on many small operations that human written kernels can achieve but torch compile isn't able to see them.
+
+To bypass torch compile's performance here, we need to exploit physics/mathematical equations and use custom kernels where we can fuse many operations together along with lower precision dtypes and reduce global memory passes significantly. A support for this argument is the `lgatr-slim` white paper and library that achieves similar results compared to existing benchmarks with extremely low computational resources:
+
+![lgatr-slim](assets/pics/lgatr_slim.png)
 
 ---
 
@@ -201,7 +210,7 @@ The goal was to understand the LorentzParT training pipeline deeply enough to id
 
 **What was found through analysis:**
 
-torch compile already provides a great and optimised baseline for the pipeline. Writing custom kernels can vastly be ruled out of project scope and only well understood graph breaks and overall pipeline optimisation should be priortised over custom kernels for  what torch compile already does efficiently.
+torch compile already provides a great and optimised baseline for the pipeline. torch.Inductor is good for general neural network based patterns and struggles with peak ops fusions in PINNs(physics informed neural networks).
 
 **What the ablations ruled out:**
 
@@ -209,11 +218,34 @@ SDPA (FlashAttention) was tested and showed a regression at N=128 — compile's 
 
 **What this means for the GSoC project:**
 
-The profiling work can be used as a baseline for final deliverable project, where majority effort can be oriented towards exploring new architectures (for ex: JEPA), ablation and benchmarking results.
+The profiling work can be used as a baseline for final deliverable project, where majority effort can be oriented towards implementing  more physics oriented kernels for further optimisations and exploring new architectures (for ex: JEPA), ablation and benchmarking results.
+
+## Repository Structure
+
+Hybrid_Transformer_Thanh_Nguyen/
+├── assets/             
+│   ├── pics/           
+│   └── results/        
+├── configs/            
+├── data/               
+├── inductor_out/       # Generated Triton kernels from torch.compile
+├── jobs/               
+├── logs/               
+├── notebooks/          
+├── scripts/            
+├── src/                
+├── tests/             
+├── traces_dir/         # PyTorch Profiler trace files
+├── venv/               
+├── .gitignore         
+├── README.md           
+└── requirements.txt    
+
 
 ## References
 
 - Qu, H., Li, C., & Qian, S. (2022). [Particle Transformer for Jet Tagging](https://arxiv.org/abs/2202.03772). *ICML 2022*.
 - Brehmer, J. et al. (2023). [L-GATr: Geometric Algebra Transformers for Large-Scale Simulations](https://arxiv.org/abs/2305.18415).
+- Petitjean, A., Plehn, T., Spinner, J., & Köthe, U. (2026). [Economical Jet Taggers - Equivariant, Slim, and Quantized](https://doi.org/10.48550/arXiv.2512.17011).
 - PyTorch. [torch.compile documentation](https://pytorch.org/docs/stable/generated/torch.compile.html).
 - Dao, T. et al. (2022). [FlashAttention: Fast and Memory-Efficient Exact Attention](https://arxiv.org/abs/2205.14135).

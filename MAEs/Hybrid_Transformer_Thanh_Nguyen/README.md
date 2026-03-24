@@ -196,7 +196,7 @@ This leaves us with another path to explore.
 
 And to squeeze out performances from the setup that torch compile can't, we need to take account that physics related operations are being fused as generic operations since torch.Inductor can only fuse based on what templates it have. Therefore, it might not be able to achieve the peak of fusions on many small operations that human written kernels can achieve but torch compile isn't able to see them.
 
-To bypass torch compile's performance here, we need to exploit physics/mathematical equations and use custom kernels where we can fuse many operations together along with lower precision dtypes and reduce global memory passes significantly. A support for this argument is the `lgatr-slim` white paper and library that achieves similar results compared to existing benchmarks with extremely low computational resources:
+To bypass torch compile's performance here, we need to exploit physics/mathematical equations and use custom kernels where we can fuse many operations together along with lower precision dtypes and reduce global memory passes significantly. A support for this argument is the `lgatr-slim` white paper and library that achieves similar results compared to existing benchmarks with relatively lower computational resources:
 
 ![lgatr-slim](assets/pics/lgatr_slim.png)
 

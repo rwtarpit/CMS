@@ -220,29 +220,17 @@ SDPA (FlashAttention) was tested and showed a regression at N=128 — compile's 
 
 The profiling work can be used as a baseline for final deliverable project, where majority effort can be oriented towards implementing  more physics oriented kernels for further optimisations and exploring new architectures (for ex: JEPA), ablation and benchmarking results.
 
-## Repository Structure
+## Updated Codebase
 
-Hybrid_Transformer_Thanh_Nguyen/
-
-├── assets/             
-│   ├── pics/           
-│   └── results/        
-├── configs/            
-├── data/               
-├── inductor_out/       # Generated Triton kernels from torch.compile
-
-├── jobs/               
-├── logs/               
-├── notebooks/          
-├── scripts/            
-├── src/                
-├── tests/             
-├── traces_dir/         # PyTorch Profiler trace files
-
-├── venv/               
-├── .gitignore         
-├── README.md           
-└── requirements.txt    
+ - [torch compile (graph breaks and compiled triton kernels)](https://github.com/rwtarpit/CMS/tree/main/MAEs/Hybrid_Transformer_Thanh_Nguyen/inductor_out/inductor_debug/torchinductor)
+ - [torch profiler (traces)](https://github.com/rwtarpit/CMS/tree/main/MAEs/Hybrid_Transformer_Thanh_Nguyen/traces_dir)
+ - benchmarking branch : 
+   - [models/particle_transformer.py](https://github.com/rwtarpit/CMS/blob/benchmarking/MAEs/Hybrid_Transformer_Thanh_Nguyen/src/models/particle_transformer.py)
+   - [scripts/train_LorentzParT.py](https://github.com/rwtarpit/CMS/blob/benchmarking/MAEs/Hybrid_Transformer_Thanh_Nguyen/scripts/train_LorentzParT.py)
+ - optimisation branch : 
+   - [scripts/train_LorentzParT.py](http://github.com/rwtarpit/CMS/blob/optimisations/MAEs/Hybrid_Transformer_Thanh_Nguyen/scripts/train_LorentzParT.py)
+   - [src/engine/jetclass_trainer.py](https://github.com/rwtarpit/CMS/blob/optimisations/MAEs/Hybrid_Transformer_Thanh_Nguyen/src/engine/jetclass_trainer.py)
+  
 
 
 ## References

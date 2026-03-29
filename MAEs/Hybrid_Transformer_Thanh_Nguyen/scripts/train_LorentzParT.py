@@ -43,12 +43,36 @@ def _train_worker(
     import json
     import warnings
     import torch
+    import torch._dynamo
 
     from src.configs import LorentzParTConfig, TrainConfig
     from src.engine import JetClassTrainer, MaskedModelTrainer
     from src.models import LorentzParT
     from src.utils import accuracy_metric_ce, set_seed, setup_ddp, cleanup_ddp
     from src.utils.data import LazyJetClassDataset
+
+    import lgatr.utils.einsum as lgatr_einsum
+    import lgatr.primitives.linear as lgatr_linear
+
+    # fix torch._VF.einsum graph break
+    def patched_custom_einsum(equation, *operands, path=None):
+        return torch.einsum(equation, *operands)
+
+    lgatr_einsum.custom_einsum = patched_custom_einsum
+    lgatr_linear.custom_einsum = patched_custom_einsum
+
+    # fix posix.lstat graph breeak
+    _basis_cpu = lgatr_linear._compute_pin_equi_linear_basis(
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    def _make_patched_basis(basis_cpu):
+        def _patched_basis(device=torch.device("cpu"), dtype=torch.float32):
+            return basis_cpu.to(device=device, dtype=dtype)
+        return _patched_basis
+
+    lgatr_linear._compute_pin_equi_linear_basis = _make_patched_basis(_basis_cpu)
 
     warnings.filterwarnings("ignore")
     set_seed(seed)
@@ -70,6 +94,13 @@ def _train_worker(
 
     setup_ddp(rank, world_size)
     device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+    
+    _basis_gpu = _basis_cpu.to(device=device)
+
+    def _patched_basis_gpu(device=torch.device("cpu"), dtype=torch.float32):
+        return _basis_gpu.to(dtype=dtype)
+
+    lgatr_linear._compute_pin_equi_linear_basis = _patched_basis_gpu
 
     normalize = [True, False, False, True]
     norm_dict = {
@@ -169,7 +200,7 @@ def run_training(
     world_size = torch.cuda.device_count()
     print(f"Launching on {world_size} GPUs")
 
-    run_name = "torch_compile_masked_pretraining_LorentzParT"
+    run_name = "graph_break_benchmark_tc_ro"
     print(f"Run: {run_name}")
 
     worker_args = (

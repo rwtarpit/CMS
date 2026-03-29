@@ -39,14 +39,14 @@ class ParticleProcessor(nn.Module):
         z = min_pT / (pT_sum + eps)
         m2 = energy_sum**2 - momentum_sum.norm(dim=-1)**2
 
-        if torch.isnan(delta).any():
-            raise ValueError("NaN detected in delta calculation.")
-        if torch.isnan(kT).any():
-            raise ValueError("NaN detected in kT calculation.")
-        if torch.isnan(z).any():
-            raise ValueError("NaN detected in z calculation.")
-        if torch.isnan(m2).any():
-            raise ValueError("NaN detected in m2 calculation.")
+        #if torch.isnan(delta).any():
+        #    raise ValueError("NaN detected in delta calculation.")
+        #if torch.isnan(kT).any():
+        #    raise ValueError("NaN detected in kT calculation.")
+        #if torch.isnan(z).any():
+        #    raise ValueError("NaN detected in z calculation.")
+        #if torch.isnan(m2).any():
+        #    raise ValueError("NaN detected in m2 calculation.")
 
         # Take the logarithm of the features
         ln_delta = torch.log(torch.clamp(delta, min=eps))
@@ -54,14 +54,14 @@ class ParticleProcessor(nn.Module):
         ln_z = torch.log(torch.clamp(z, min=eps))
         ln_m2 = torch.log(torch.clamp(m2, min=eps))
 
-        if torch.isnan(ln_delta).any():
-            raise ValueError("NaN detected in ln_delta calculation.")
-        if torch.isnan(ln_kT).any():
-            raise ValueError("NaN detected in ln_kT calculation.")
-        if torch.isnan(ln_z).any():
-            raise ValueError("NaN detected in ln_z calculation.")
-        if torch.isnan(ln_m2).any():
-            raise ValueError("NaN detected in ln_m2 calculation.")
+        #if torch.isnan(ln_delta).any():
+        #    raise ValueError("NaN detected in ln_delta calculation.")
+        #if torch.isnan(ln_kT).any():
+        #    raise ValueError("NaN detected in ln_kT calculation.")
+        #if torch.isnan(ln_z).any():
+        #    raise ValueError("NaN detected in ln_z calculation.")
+        #if torch.isnan(ln_m2).any():
+        #    raise ValueError("NaN detected in ln_m2 calculation.")
 
         # Combine the features into a single tensor
         U_vals = torch.stack((ln_delta, ln_kT, ln_z, ln_m2), dim=-1)  # (B, N, N, 4)
@@ -73,7 +73,7 @@ class ParticleProcessor(nn.Module):
         valid_pairs = mask.unsqueeze(2) & mask.unsqueeze(1)
 
         # Fill U only for valid pairs
-        U[valid_pairs] = U_vals[valid_pairs]
+        U = torch.where(valid_pairs.unsqueeze(-1), U_vals, torch.full_like(U_vals, -1e9))
 
         # Zero out diagonal elements (self-interactions)
         idx = torch.arange(U.size(1), device=U.device)

@@ -157,7 +157,7 @@ model = torch.compile(model, mode="reduce-overhead")
 
 **Avg step time: 127,965 µs (−32% vs baseline)**
 
-With `reduce-overhead` mode we were able to squeeze more from torch compile as now request to CPU to dispatch each kernel again and again for each step is reduced.
+With `reduce-overhead` mode we were able to squeeze more from torch compile as now request to CPU to dispatch each kernel again and again for each step is reduced. Furhtermore, there were few CUDA operations that were leading to CUDA graph breaks, which I identified through `full_graph=True` flag in torch compile and fixed them one by one in `benchmarking` branch of this codebase.
 The 96% reduction in Memcpy time is the clear signature of CUDA graph replay — repeated host-device transfers are replaced by pre-recorded graph execution.
 
 Although the kernel time remains same hinting towards that torch compile has squeezed out peak possible fusion and kernels it could manage to.
@@ -181,17 +181,7 @@ But the results were lower than torch compile itself.
 
 Even though torch compile has been able to provide a big optimisation already, thanks to its fused kernels, we can still push for more benefits.
 
-If we inspect the CUDA graph created by `torch.compile(..., mode=``reduce-overhead``)` it shows many graph breaks. These graph breaks means that CPU has to intervene again to dispatch kernels again in each step. Possible likely reasons for this are the operations that torch compile isn't able to fuse, dynamic input shapes, calls to CPU (for ex: print statements).
-
-Few points of graph breaks that i was able to understand were operations in these modules:
- - lgatr's Equilinear layer
- - Interaction Embedding
-
-![graph breaks](assets/pics/graph_break.png)
-
-The goal should be to achieve a single CUDA graph for forward pass and backward pass respectively. This leads to zero CPU intervention for kernel dispatching and therefore can optimise the pipeline even more.
 For multi GPU setup, this may benefit if data loading pipeline turns out to be slower, as then CPU can allocate resources to data prefetching instead.
-
 This leaves us with another path to explore.
 
 And to squeeze out performances from the setup that torch compile can't, we need to take account that physics related operations are being fused as generic operations since torch.Inductor can only fuse based on what templates it have. Therefore, it might not be able to achieve the peak of fusions on many small operations that human written kernels can achieve but torch compile isn't able to see them.
@@ -214,7 +204,7 @@ torch compile already provides a great and optimised baseline for the pipeline. 
 
 **What the ablations ruled out:**
 
-SDPA (FlashAttention) was tested and showed a regression at N=128 — compile's `baddbmm` + fused softmax is already optimal at this sequence length, and FlashAttention's advantage only materializes at changing model hyperparameters.
+SDPA (FlashAttention) was tested and showed a regression at N=128 — compile's `baddbmm` + fused softmax is already optimal at this sequence length, and FlashAttention's advantage only materializes at changing model hyperparameters. A custom `pmha` kernel can also be explored for keeping the architectural hyperparameters constant.
 
 **What this means for the GSoC project:**
 
